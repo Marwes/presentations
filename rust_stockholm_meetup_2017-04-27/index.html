@@ -1,0 +1,521 @@
+<!DOCTYPE html>
+<html>
+
+<head>
+  <title>Title</title>
+  <meta charset="utf-8">
+  <style>
+    @import url(https://fonts.googleapis.com/css?family=Yanone+Kaffeesatz);
+    @import url(https://fonts.googleapis.com/css?family=Droid+Serif:400,700,400italic);
+    @import url(https://fonts.googleapis.com/css?family=Ubuntu+Mono:400,700,400italic);
+    body {
+      font-family: 'Droid Serif';
+    }
+    
+    h1,
+    h2,
+    h3 {
+      font-family: 'Yanone Kaffeesatz';
+      font-weight: normal;
+    }
+    
+    .remark-code,
+    .remark-inline-code {
+      font-family: 'Ubuntu Mono';
+    }
+    img {
+      max-width: 100%;
+    }
+  </style>
+</head>
+
+<body>
+  <textarea id="source">
+
+class: center, middle
+
+# Gluon 
+
+```f#
+io.println "Hello World!"
+```
+
+By Markus Westerlind
+
+???
+
+Introduction
+
+Small programming language, why and how I wrote it in Rust
+
+Hope that this gives a good mix of gluon-the-language and how Rust works with it
+
+---
+
+# Gluon
+
+???
+
+Think you already know what Rust is, I will start with a short introduction to gluon
+
+--
+
+* Static typing with type inference
+
+```f#
+let double x = x * 2
+double // double : Int -> Int
+```
+
+???
+
+Super short, statically typed Lua
+
+--
+
+* Thread safe and concurrent
+
+```rust
+let vm = gluon::new_vm();
+::std::thread::spawn(|| vm.run_expr(...))
+```
+
+--
+
+* Strings are UTF-8 by default
+
+```f#
+io.println "😀"
+```
+
+???
+
+Mimick Rust, do it correctly from the start
+
+---
+
+# Gluon
+
+* Easy embedding
+
+```rust
+    vm.define_global("float",
+                       record!(
+        infinity => f64::INFINITY,
+        pi => f64::consts::PI,
+        radix => f64::RADIX,
+        is_nan => primitive!(1 f64::is_nan),
+        round => primitive!(1 f64::round),
+        trunc => primitive!(1 f64::trunc),
+    });
+
+// Gluon
+// float.round float.pi
+```
+
+---
+
+```f#
+let factorial n =
+    if n < 2
+    then 1
+    else n * factorial (n - 1)
+
+// `type` is used to declare a new type.
+// In this case we declare `Countable` to be a record with a single field (count) which is a function
+// taking a single argument and returning an integer
+type Countable a = { count : a -> Int }
+
+// "Counting" an integer just means returning the integer itself
+let countable_Int : Countable Int = { count = \x -> x }
+
+let list_module = /* ... */
+
+// Bring the `List` type and its constructors into scope
+let { List, countable_List } = list_module
+
+// Create a `Countable` record for `List Int`
+let { count } : Countable (List Int) = countable_List countable_Int
+
+if count (Cons 20 (Cons 22 Nil)) == 41 then
+    error "This branch is not executed"
+else
+    io.print "Hello world!"
+```
+
+---
+
+# Parser
+
+???
+
+Back when I started working in rust, Crate eco system barely existed (existed at all?)
+
+--
+
+Started with a handwritten recursive descent parser
+
+```rust
+fn parse_expr(&mut self) -> Expr {
+  match self.next_token() {
+    Integer() => Expr::Integer(..),
+    OpenParen => {
+      let e = self.parse_expr();
+      self.expect(CloseParen);
+      e
+    }
+    ...
+  }
+}
+```
+
+--
+
+Extremely flexible
+
+--
+
+Common patterns such as repetition or optional element are duplicated
+
+--
+
+Good error messages takes extra effort
+
+---
+
+## Combine
+
+Built my own parser combinator library
+
+???
+
+nom
+
+Readability is reasonable without needing external tools
+
+Errors are mostly automatic (expected letter)
+
+--
+
+Parser combinators are small composable functions
+
+```rust
+extern crate combine;
+use combine::{many, Parser};
+use combine::char::letter;
+
+let result = many1(letter()).parse("hello world");
+assert_eq!(result, Ok(("hello".to_string(), " world")));
+```
+
+.footnote[https://github.com/Marwes/combine]
+
+---
+
+## LALRPOP
+
+```
+grammar;
+
+AtomicExpr: Expr = {
+    <id: Ident> =>
+        Expr::Ident(TypedIdent::new(id)),
+
+    <expr: AtomicExpr> "." <id: Ident> =>
+        Expr::Projection(Box::new(expr), id, Type::hole()),
+
+    "(" <elems: Comma<SpExpr>> ")" => ...,
+
+    ...
+};
+```
+
+.footnote[https://github.com/nikomatsakis/lalrpop]
+
+???
+
+Easier to read and update
+
+Changed last autumn, crate eco system in a much better place!
+
+--
+
+Generates Rust code
+
+---
+
+## LALRPOP
+
+```
+grammar;
+
+AtomicExpr: Expr = {
+    <id: Ident> =>
+        Expr::Ident(TypedIdent::new(id)),
+
+    <expr: AtomicExpr> "." <id: Ident> =>
+        Expr::Projection(Box::new(expr), id, Type::hole()),
+
+*    <expr: AtomicExpr> "." <err: !> => {
+*        errors.push(err.error);
+*        Expr::Projection(Box::new(expr), env.from_str(""), Type::hole())
+*    },
+
+    "(" <elems: Comma<SpExpr>> ")" => ...,
+
+    ...
+};
+```
+
+.footnote[https://github.com/nikomatsakis/lalrpop]
+
+???
+
+Not only easier to read. Supports things like error recovery.
+
+Necessary for reporting errors on unfinish code, auto completion
+
+---
+
+# Typechecking
+
+???
+
+Most distinctive part of gluon
+
+Some loss of flexibility which is useful for scripting.
+But one instead gains type safety in the api layer
+
+Might pay off, might not
+
+--
+
+Hindley-Milner typesystem
+
+???
+
+Type unification quite elegant
+
+--
+
+Largely similiar to Rust's typesystem
+
+???
+
+Similarity to Rust important since we want to map as much of Rust as possible into the language
+
+---
+
+# Typechecking - Not so rusty
+
+Typechecking allocates a lot of type values
+
+???
+
+Each expression has a type
+
+Need to share type instances as much as possible
+
+Difficult due to Rust's strict ownership rules.
+
+`&T` simplest, rustc does this, arena allocated. Need to deallocated unused instances since the virtual machine is persistent.
+
+`Rc<T>` works, reasonably fast, used it for a while, need `Arc<T>` for the vm to be thread safe, rust forces this to be explicit.
+
+`Arc<T>` may be more expensive than necessary otherwise (atomic operations)
+
+--
+
+Need to share instances as much as possible
+
+--
+
+`&T`?
+--
+  No, Need a long lived object
+
+--
+
+`Rc<T>`
+--
+  Almost, does not work when considering threaded programs
+
+--
+  
+`Arc<T>`
+--
+  Works! (But atomic operations makes it more expensive)
+
+---
+
+# Virtual machine
+
+???
+
+The main reason for choosing Rust in the first place. Embedded programs
+
+Async -> Futures, Tokio
+
+--
+
+Runs bytecode
+--
+
+* Garbage collected
+
+--
+
+* Easy FFI
+
+--
+
+*  Asynchronous functions
+
+---
+name: segfault-machine
+
+# Segfault machine
+
+Almost all `unsafe` code is in the virtual machine
+
+???
+
+Garbage collection is inherently unsafe since Rust has no understandig of it
+
+1st, accidently allocated to little memory in a garbage collector test
+
+2nd, Did not limit the amount of stack space gluon program could use causing OOM
+
+Running arbitrary code, requires:
+  Locking down which functions can be called -> Pure language, IO only runs when explicitly asked
+
+3rd, Stored short lived values in a long lived table 
+
+--
+
+3 segfaults slipped through
+
+--
+
+```rust
+-            elems.len() * mem::size_of::<ElementType>()
++            mem::size_of::<VecType>()
+```
+
+--
+
+```f#
+let stackoverflow x =
+    x + stackoverflow x
+
+stackoverflow 123
+```
+
+--
+
+```f#
+let vm = new_vm();
+{
+  let child_vm = vm.new_child_vm();
+  vm.store(child_vm.alloc_value());
+  // child_vm's values are destroyed
+}
+```
+
+--
+
+https://github.com/gluon-lang/gluon/pull/196
+
+---
+
+class: center, middle
+
+# Tooling
+
+???
+
+Things I didn't think I'd end up doing at the start, but turned crucial and interesting.
+
+Parts are written in gluon and I want to port more things over time.
+
+---
+
+## REPL
+
+![REPL](https://camo.githubusercontent.com/f7a32d7f0f00b68b2a3ac639d5eb2bdbec1eb9e6/687474703a2f2f692e696d6775722e636f6d2f49584c514674562e676966)
+
+???
+
+Great focus on cross-platform libraries, Using Rustyline to read lines, save history
+
+---
+
+## Language server
+
+[Language server protocol](https://code.visualstudio.com/blogs/2016/06/27/common-language-protocol#_how-it-works)
+
+???
+
+Created last summer
+
+Most popular languages have some level of language server support
+
+Can use any editor with any language
+
+Had started to think I should use the static type information, Micrsoft + VS Code announced
+language server a few weeks later.
+
+Needed to build some plumbing myself at the start, but not there are several projects using
+it in Rust (RLS)
+
+Code formatting
+
+--
+
+.center[![Language server image](https://camo.githubusercontent.com/4937542d94501e024c58976cd7306363d7ad9bd6/687474703a2f2f692e696d6775722e636f6d2f343462483077772e676966)]
+
+.footnote[http://langserver.org/]
+
+---
+
+## Online sandbox
+
+.footnote[ [Try Gluon](http://ec2-52-29-1-213.eu-central-1.compute.amazonaws.com/)]
+
+???
+
+Currently Rust backend and Elm front end.
+
+Want to rewrite the rust backend into gluon. (http example)
+
+---
+
+class: center, middle
+
+# Questions?
+
+---
+
+class: center, middle
+
+# Thanks for listening
+
+https://github.com/gluon-lang/gluon
+
+https://github.com/Marwes/
+
+Markus Westerlind
+
+
+    </textarea>
+  <script src="https://gnab.github.io/remark/downloads/remark-latest.min.js">
+
+  </script>
+  <script>
+    var slideshow = remark.create({
+      highlightLines: true
+    });
+  </script>
+</body>
+
+</html>
